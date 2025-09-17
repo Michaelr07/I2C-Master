@@ -3,7 +3,7 @@
 Small, self-contained I²C master with a simple slave BFM and a self-checking testbench.
 
 ## Features
-- 7-bit addressing; **write**, **read**, and **combined** write → repeated-START → read
+- 7-bit addressing; **write**, **read**, and **combined** write > repeated-START > read
 - Streaming interfaces  
   - **Write**: `wr_data[7:0]`, `wr_valid / wr_ready`  
   - **Read**: `rd_data[7:0]`, `rd_valid / rd_ready`
