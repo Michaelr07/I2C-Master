@@ -1,3 +1,46 @@
+// Description:
+//   Parameterized I2C master controller supporting both write and read
+//   transactions using the standard 7-bit addressing mode.
+//   Generates start, stop, and optional repeated-start conditions,
+//   supports clock stretching, and provides streaming-style interfaces
+//   for data in/out.
+//
+//   Designed for single-master systems. Uses open-drain (tri-stated)
+//   SDA and SCL lines compatible with external pull-up resistors.
+//
+// Features:
+//    Configurable system clock and I2C speed (default 100 kHz).
+//    Optional clock stretching detection (STRETCH_EN).
+//    Supports multi-byte writes and reads with ACK/NACK handling.
+//    Detects NACK on address and data phases.
+//    Timeout detection if SCL is held low too long.
+//    Clean handshaking using `wr_valid/ready` and `rd_valid/ready`.
+//
+// Parameters:
+//   SYS_CLK     - System clock frequency in Hz (default 100_000_000).
+//   I2C_SPEED   - Target I2C bit rate in Hz (default 100_000).
+//   STRETCH_EN  - Enable clock-stretching detection (1 = enable).
+//
+// Ports:
+//   clk, rst_n     : System clock and active-low reset.
+//   start          : Pulse to begin a transaction.
+//   addr7          : 7-bit slave address.
+//   wr_len, rd_len : Number of bytes to write/read.
+//   busy, done     : Transaction status outputs.
+//   nack_addr/data : Flags for NACK detection.
+//   timeout        : Indicates SCL held low (stretch failure).
+//   wr_data/valid/ready : Streaming write interface.
+//   rd_data/valid/ready : Streaming read interface.
+//   sda_io, scl_io : Bidirectional open-drain I2C lines.
+//
+// References:
+//   - UM10204 I²C-bus specification and user manual, NXP Semiconductors.
+//   - Adapted and extended from public HDL examples for educational use.
+//
+// Notes:
+//   SDA/SCL are tri-stated ('z') when released.
+//   Designed for simple integration with an I2C sequencer or controller.
+
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -70,7 +113,7 @@
     
     //Control logic for write/read
     logic [7:0] tx_rem, rx_rem;   // remaining write bytes
-    logic do_write, do_read, do_both;
+    logic do_write, do_read, do_both, rw_bit;
     logic addr_byte, stop_bit;
     logic wr_accept, wr_accept_q, stop_now;
     logic ack_on_read;
@@ -100,31 +143,22 @@
         end
         
     assign ack_on_read  = (!addr_byte && do_read && (rx_rem > 8'd1));
-    assign wr_accept = (state == BYTE_LOAD) && wr_valid;
-    
-    always_ff @(posedge clk or negedge rst_n)
-        if (!rst_n) wr_ready    <= 1'b0;
-        else        wr_ready    <= (state == BYTE_LOAD);
-    
-    always_ff @(posedge clk or negedge rst_n) 
-        if (!rst_n)         shift_reg <= '0;
-        else if (wr_accept) shift_reg <= wr_data;
         
     always_ff @(posedge clk or negedge rst_n) 
         if (!rst_n)                                         rd_valid <= 1'b0;
         else if (state==ACK_LOW && do_read && !addr_byte)   rd_valid <= 1'b1;
         else if (rd_valid && rd_ready)                      rd_valid <= 1'b0;
         
-   // stable, second-stage SCL edges inside clk domain
+    // stable, second-stage SCL edges inside clk domain
     logic scl_in_d;
     always_ff @(posedge clk or negedge rst_n)
         if (!rst_n) scl_in_d <= 1'b0;
         else        scl_in_d <= scl_in;
         
-    logic phase_read;     // 0=first phase, 1=after repeated START (read phase)
+    logic phase_read;                                       // 0=first phase, 1=after repeated START (read phase)
     logic scl_rise_sync, scl_fall_sync, stall_read;
     
-    assign scl_rise_sync =  scl_in & ~scl_in_d;   // use these, not tick
+    assign scl_rise_sync =  scl_in & ~scl_in_d;             
     assign scl_fall_sync = ~scl_in &  scl_in_d;
     assign stall_read = STRETCH_EN && do_read && !addr_byte && rd_valid && !rd_ready;
                  
@@ -133,7 +167,6 @@
     assign repeated_start   = (!addr_byte && do_both && do_write && (tx_rem == 0));
     assign stop_bit         = nack_addr || nack_data || ((!addr_byte && do_write && (tx_rem == 0))&& !do_both)
                                                  || (!addr_byte && do_read && (rx_rem == 0));
-    
     
     //state register
     always_ff @(posedge clk or negedge rst_n)
@@ -200,6 +233,9 @@
             addr_byte   <= 1'b0;
             tx_rem      <= 1'b0;
             phase_read  <= 1'b0;
+            rw_bit      <= 1'b0;
+            wr_ready    <= 1'b0;
+            wr_accept   <= 1'b0;
         end
         else begin
             case (next)
@@ -219,6 +255,9 @@
                                                 tx_rem      <= '0;
                                                 rx_reg      <= '0;
                                                 phase_read  <= 1'b0;
+                                                rw_bit      <= 1'b0;
+                                                wr_ready    <= 1'b0;
+                                                wr_accept   <= 1'b0;
                                             end
                 START_HI                :   begin
                                                 sda_drv_low <= 1'b0;
@@ -231,29 +270,38 @@
                                                     do_read  <= (rd_len!=0) && (wr_len==0);
                                                     tx_rem   <= wr_len;
                                                     rx_rem   <= rd_len;
+                                                    rw_bit   <= (wr_len==0) ? 1'b1 : 1'b0;
                                                 end                                                   
                                             end
                 START_FALL, START_HOLD  :   begin
                                                 sda_drv_low <= 1'b1;
                                                 scl_drv_low <= 1'b0;
-                                                phase_read  <= 1'b0;
+                                                //phase_read  <= 1'b0;
                                             end
                 ADDR_LOAD               :   begin                                               
                                                 sda_drv_low <= 1'b1;                          
                                                 scl_drv_low <= 1'b1;
                                                 addr_byte   <= 1'b1;
-                                                shift_reg   <= (do_write)? {addr7,1'b0} : {addr7,1'b1};
+                                                shift_reg   <= {addr7,rw_bit};
+                                            
                                             end    
                                             
                 BYTE_LOAD               :   begin                                                             
                                                 scl_drv_low <= 1'b1;
+                                                wr_ready    <= 1'b1;
+                                                if (wr_valid && wr_ready) begin
+                                                    wr_ready    <= 1'b0;
+                                                    shift_reg   <= wr_data;
+                                                    wr_accept   <= 1'b1;
+                                                end   
                                                 if (do_write)
                                                     sda_drv_low <= 1'b1;      
                                                 else 
-                                                    sda_drv_low <= 1'b0;     //release              
+                                                    sda_drv_low <= 1'b0;               
                                             end
                 BIT_LOW                 :   begin
                                                 scl_drv_low <= 1'b1;
+                                                wr_accept   <= 1'b0;
                                                 if (do_write || addr_byte)
                                                     sda_drv_low <= (shift_reg[7])? 1'b0 : 1'b1;
                                                 else if (do_read)
@@ -302,14 +350,11 @@
                                                 
                                             end         
                 RESTART                 :   begin
-                                              // finish ACK, force one low phase on SCL so slave can release SDA
                                               scl_drv_low <= 1'b1;     // pull SCL low
                                               sda_drv_low <= 1'b0;     // release SDA
-                                              //addr_byte   <= 1'b0;
                                               do_write    <= 1'b0;
                                               do_read     <= 1'b1;     // prepare read phase
                                               phase_read  <= 1'b1;
-                                              // (keep tx_rem/rx_rem as already set for combined op)
                                             end
                 STOP_PREP               :   begin
                                                 sda_drv_low <= 1'b1;
@@ -324,7 +369,7 @@
                                                 phase_read  <= 1'b0;
                                                 
                                             end
-               default: ;                   //to apply defaults
+               default: ;    
             endcase
        end
     end
